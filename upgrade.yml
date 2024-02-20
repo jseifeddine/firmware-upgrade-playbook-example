@@ -1,0 +1,68 @@
+# start backup process
+- name: backup current configuration save to /tmp
+  shell:
+    cmd: "sysupgrade -b /tmp/{{inventory_hostname}}_{{ansible_host}}_{{firmware_version}}.tar.gz"
+  register: sysbackup
+  timeout: 30
+
+- name: fetch backup file from host to /tmp
+  fetch:
+    src: "/tmp/{{inventory_hostname}}_{{ansible_host}}_{{firmware_version}}.tar.gz"
+    dest: "/tmp/"
+    flat: yes
+  timeout: 600
+  when: sysbackup.changed
+
+- name: add {{ docker_host.name }} to inventory
+  add_host: "{{ docker_host }}"
+  run_once: true
+  changed_when: false
+  
+- name: copy backup file to {{ docker_host.name }}:/etc/ansible/backups
+  copy:
+    src: "/tmp/{{inventory_hostname}}_{{ansible_host}}_{{firmware_version}}.tar.gz"
+    dest: "/etc/ansible/backups/"
+  timeout: 600
+  delegate_to: "{{ docker_host.name }}"
+  register: backup_copy
+
+# start firmware upgrade process
+- name: copy {{ task_firmware }} firmware to device
+  copy:
+    src: "{{playbook_dir}}/files/firmware/{{ task_firmware }}.bin"
+    dest: /tmp/{{ task_firmware }}.bin
+  timeout: 600
+  when: backup_copy is success
+
+- name: start {{ task_firmware }} sysupgrade and wait for reboot
+  shell: |
+    sysupgrade /tmp/{{ task_firmware }}.bin &> /tmp/sysupgrade_output &
+    while true; do
+      if grep -i "upgrade" /tmp/sysupgrade_output; then
+        exit 0
+      fi
+    done
+  register: sysupgrade
+  timeout: 60
+
+- name: wait for host to become reachable
+  wait_for_connection:
+    delay: 90
+  register: wait_for_connection
+  until: wait_for_connection.unreachable is not defined
+  retries: 7
+  when: sysupgrade.changed
+
+- name: get current firmware version
+  slurp:
+    src: /etc/version
+  register: version
+  timeout: 30
+
+- set_fact:
+    previous_version: "{{ firmware_version }}"
+    firmware_version: "{{ version['content'] | b64decode | regex_replace('\n', '') }}"
+
+- name: confirm upgrade
+  debug:
+    msg: "firmware on host {{ ansible_host }} successfully upgraded from {{ previous_version }} ---> {{ firmware_version }}, proceeding to {% if firmware_version in target %}package installation{% else %}upgrade to {{ target[0] }}{% endif %}"

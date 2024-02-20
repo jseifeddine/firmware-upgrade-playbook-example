@@ -1,0 +1,19 @@
+- name: cleanup /tmp/ansible-tmp-*
+  shell:
+    cmd: "rm -rf /tmp/ansible-tmp-*"
+  changed_when: false
+  failed_when: false
+  timeout: 30
+
+- name: wait for unimpeded access to opkg(solo)
+  shell: 
+    cmd: |
+      for i in {1..60}; do
+        [ -f "/bin/opkg-solo" ] || ([ ! -f "/var/lock/opkg.lock" ] && [ -f "/bin/opkg" ] && mv "/bin/opkg" "/bin/opkg-solo") && [ ! -f "/bin/opkg" ] && exit 0 || exit 1
+        sleep 1
+      done
+  register: opkg_solo
+  retries: 2
+  changed_when: false
+  timeout: 180
+  until: opkg_solo.rc == 0

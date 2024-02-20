@@ -1,0 +1,54 @@
+- name: check if {{ item.name }} package and dependencies are installed
+  opkg:
+    name: "{{ item.dependencies | join(',') }}"
+  check_mode: true
+  register: opkg_check
+  when: firmware_version in target
+  timeout: 120
+
+- name: needs packages
+  block:
+    - name: ensure interface wwan0 is down to prevent device pulling packages from rms
+      shell:
+        cmd: "ifconfig wwan0 0.0.0.0"
+      changed_when: false
+      failed_when: false
+      timeout: 30
+
+    - name: copy {{ item.name }}.tar.gz to device
+      copy:
+        src: "{{playbook_dir}}/files/packages/{{ item.name }}.tar.gz"
+        dest: /tmp
+      register: copy_packages
+      timeout: 120
+
+    - name: extract {{ item.name }} package and dependencies
+      shell: |
+        set -e  # Exit immediately if a command exits with a non-zero status.
+        cd /tmp
+        mkdir -p "/tmp/{{ item.name }}"
+        tar -xzf "/tmp/{{ item.name }}.tar.gz" -C "/tmp/{{ item.name }}"
+        cd "{{ item.name }}"
+        for file in *.ipk; do
+          pkg_name=$(echo "$file" | cut -d'_' -f1)
+          new_name="${pkg_name}.ipk"
+          mv "$file" "$new_name"
+        done
+      when: not copy_packages.failed and copy_packages.changed
+      timeout: 30
+
+    - name: install {{ item.name }} package and dependencies with opkg(solo)
+      opkg:
+        name: "{{ item.dependencies | map('regex_replace', '^(.*)$', '/tmp/' + item.name + '/\\1.ipk') | join(',') }}"
+        state: present
+        force: overwrite
+      until: opkg_task.failed == false
+      register: opkg_task
+      retries: 5
+      delay: 10
+      timeout: 300
+
+    - set_fact:
+        reboot_required: true
+
+  when: firmware_version not in target or opkg_check.changed

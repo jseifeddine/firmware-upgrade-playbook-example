@@ -1,0 +1,20 @@
+---
+- name: pin defaults
+  set_fact:
+    openwrt_ssh: "{{ openwrt_ssh }}"
+    openwrt_scp: "{{ openwrt_scp }}"
+    openwrt_ssh_user: "{{ openwrt_ssh_user }}"
+    openwrt_ssh_host: "{{ openwrt_ssh_host }}"
+    openwrt_user_host: "{{ openwrt_ssh_user | quote }}@{{ openwrt_ssh_host | quote }}"
+    ansible_ssh_transfer_method: "{{ openwrt_ssh_transfer_method }}"
+    ansible_ssh_use_tty: "{{ openwrt_ssh_use_tty }}"
+    ansible_scp_if_ssh: "{{ openwrt_scp_if_ssh }}"
+    ansible_remote_tmp: "{{ openwrt_remote_tmp }}"
+  when: "'openwrt' in group_names"
+  tags: always
+
+- name: install recommended packages
+  include_tasks: packages.yml
+  when:
+    - "'openwrt' in group_names"
+    - "openwrt_install_recommended_packages | bool"

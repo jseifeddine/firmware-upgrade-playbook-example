@@ -1,0 +1,242 @@
+- name: Teltonika RUT240 Firmware Upgrade
+  hosts: openwrt
+  gather_facts: no
+  roles:
+     - role: openwrt
+  vars:
+    passwords:
+      - secret0
+      - secret1
+    tt_snmp_community: secret-community
+    icinga2:
+      name: icinga-master
+      ansible_host: icinga-master
+      ansible_python_interpreter: /usr/bin/python3
+      discovery_cmd: "/bin/snmp-discovery"
+    docker_host:
+      name: docker-host
+      ansible_host: docker-host
+      ansible_python_interpreter: /usr/bin/python3
+    icinga_api_user: icinga-api-user
+    icinga_api_password: icinga-api-pass
+    packages:
+      - name: snmp
+        dependencies:
+          - libpcre
+          - libpci
+          - libnetsnmp
+          - libtltchilli
+          - snmp-mib
+          - vuci-app-snmp-api
+          - vuci-app-snmp-ui
+          - snmp-mod-chilli
+          - snmp-mod-device
+          - snmp-mod-gsm
+          - snmp-mod-io
+          - snmp-mod-port
+          - snmp-mod-sqm
+          - snmp-mod-vlan
+          - snmp-mod-wireless
+          - snmpd
+          - snmptrap
+          - snmp
+      - name: tr069
+        dependencies:
+          - vuci-app-tr069-api
+          - vuci-app-tr069-ui
+          - libmicroxml
+          - easycwmp
+    one_step:
+      - RUT2XX_R_00.01.14.3
+      - RUT2XX_R_00.01.14.4
+      - RUT2XX_R_00.01.14.5
+      - RUT2XX_R_00.01.14.6
+      - RUT2XX_R_00.01.14.7
+      - RUT2_R_00.07.01
+      - RUT2_R_00.07.01.2
+      - RUT2_R_00.07.01.4
+      - RUT2_R_00.07.02.2
+      - RUT2_R_00.07.02.4
+      - RUT2_R_00.07.02.5
+      - RUT2_R_00.07.02.7
+      - RUT2_R_00.07.04.1
+      - RUT2_R_00.07.04.2
+      - RUTX_R_00.07.02.8
+      - RUTX_R_00.07.04.3
+    two_step:
+      - RUT2XX_R_00.01.10
+      - RUT2XX_R_00.01.11.3
+      - RUT2XX_R_00.01.12.2
+      - RUT2XX_R_00.01.13.3
+      - RUT2XX_R_00.01.14
+    target:
+      - RUT2_R_00.07.04.5
+      - RUTX_R_00.07.04.5
+      - RUT2_R_00.07.05.4
+      - RUTX_R_00.07.05.4
+    interim_firmware: RUT2XX_R_00.01.14.4_WEBUI
+    final_firmware: RUT2_R_00.07.04.5_WEBUI
+
+  pre_tasks:
+    - block:
+        - name: Safety check 
+          debug:
+            msg: No limit was defined... this could be dangerous, aborting!!!
+          run_once: true
+          failed_when: ansible_limit is not defined or ansible_limit | trim == ''
+
+        - meta: end_play
+      
+      when: ansible_limit is not defined or ansible_limit | trim == ''
+      delegate_to: localhost
+
+    - name: test connectivity with ansible ping
+      ping:
+      register: ping_test
+      ignore_errors: true
+      ignore_unreachable: true
+      timeout: 15
+
+    - name: copy authorized_keys (using first password)
+      copy:
+        src: "{{ playbook_dir }}/files/authorized_keys"
+        dest: "/etc/dropbear/authorized_keys"
+      vars:
+        ansible_user: "root"
+        ansible_ssh_pass: "{{ passwords[0] }}"
+      when: ping_test.unreachable is defined
+      ignore_unreachable: true
+      register: first_attempt
+      timeout: 15
+
+    - name: copy authorized_keys (using second password)
+      copy:
+        src: "{{ playbook_dir }}/files/authorized_keys"
+        dest: "/etc/dropbear/authorized_keys"
+      vars:
+        ansible_user: "root"
+        ansible_ssh_pass: "{{ passwords[1] }}"
+      when: first_attempt.unreachable is defined
+      timeout: 15
+
+  tasks:
+    - block:
+        - name: get current firmware version
+          slurp:
+            src: /etc/version
+          register: version
+          timeout: 15
+
+        - set_fact:
+            firmware_version: "{{ version['content'] | b64decode | regex_replace('\n', '') }}"
+
+        - name: tasks to run if firmware needs two step upgrade
+          block:
+            - name: two step upgrade required
+              debug:
+                msg: "{{ ansible_host }} current firmware: {{ firmware_version }} needs to be upgraded to version {{ interim_firmware }} before upgrading to {{ final_firmware }}"
+            - include_tasks: preparation_tasks.yml
+            - include_tasks: upgrade.yml
+          vars:
+            task_firmware: "{{ interim_firmware }}"
+          when: firmware_version in two_step
+
+        - name: tasks to run if firmware needs one step upgrade
+          block:
+            - name: one step upgrade required
+              debug:
+                msg: "{{ ansible_host }} current firmware: {{ firmware_version }} needs to be upgraded to version {{ final_firmware }}"
+            - include_tasks: preparation_tasks.yml
+            - include_tasks: upgrade.yml
+          vars:
+            task_firmware: "{{ final_firmware }}"
+          when: firmware_version in one_step
+
+        - name: tasks to run if firmware is at target
+          block:
+            - name: firmware is at target version
+              debug:
+                msg: "preparing package installation tasks on {{ ansible_host }}"
+
+            - include_tasks: preparation_tasks.yml
+            
+            - include_tasks: packages_tasks.yml
+              loop: "{{ packages }}"
+
+            - name: final reboot
+              nohup:
+                command: reboot
+              when: reboot_required | default(false)
+              register: final_reboot
+              timeout: 30
+
+            - name: wait for host to become reachable
+              wait_for_connection:
+                delay: 90
+              register: wait_for_connection
+              until: wait_for_connection.unreachable is not defined
+              retries: 7
+              when: final_reboot.changed
+
+            - name: add icinga2 to inventory
+              add_host: "{{ icinga2 }}"
+              run_once: true
+              changed_when: false
+
+            - include_tasks: restore_tasks.yml
+              
+            - name: check presence of "TeltonikaV5" in "imports" for host in icinga2
+              shell: "/usr/bin/icingacli director host show {{ inventory_hostname }} --json"
+              register: icinga_check
+              delegate_to: "{{ icinga2.name }}"
+              changed_when: "'TeltonikaV5-HT' not in (icinga_check.stdout | from_json).imports"
+
+            - name: wait for snmpd to start on host before polling snmp and updating icinga
+              community.general.snmp_facts:
+                host: '{{ ansible_host }}'
+                version: v2c
+                community: "{{ tt_snmp_community }}"
+              register: snmp_facts
+              delegate_to: localhost
+              failed_when: false
+              when: "'TeltonikaV5-HT' not in (icinga_check.stdout | from_json).imports"
+              until: snmp_facts.ansible_facts.ansible_sysname is defined
+              retries: 5
+              delay: 10
+
+            - name: scan host and update/deploy icinga2 changes
+              shell: |
+                {{ icinga2.discovery_cmd }} -c {{ tt_snmp_community }} -n {{ ansible_host }}/32 >> /var/log/ansible-awx.log
+              delegate_to: "{{ icinga2.name }}"
+              throttle: 1
+              when: snmp_facts.ansible_facts.ansible_sysname is defined
+
+            - name: schedule force check of host's services in icinga
+              shell: |
+                future_check=$(date +%s --date='+1 minute')
+                curl -k -s -u '{{icinga_api_user}}:{{icinga_api_password}}' \
+                    -H 'Accept: application/json' \
+                    -X POST 'https://localhost:5665/v1/actions/reschedule-check' \
+                    -d "{ \"type\": \"Service\", \"filter\": \"host.name==\\\"{{inventory_hostname}}\\\"\", \"force_check\": true, \"next_check\": $future_check }"
+              delegate_to: "{{ icinga2.name }}"
+              throttle: 1
+              no_log: true
+              changed_when: false
+              register: icinga_force_check
+              until: icinga_force_check.rc == 0
+              retries: 3
+
+          when: firmware_version in target
+
+      rescue:
+        - include_tasks: restore_tasks.yml
+
+        - name: reboot failed hosts (if required)
+          nohup:
+            command: reboot
+          when: reboot_required | default(false)
+
+        - name: automation failed
+          fail:
+            msg: please address the issues and relaunch job
+          ignore_errors: true

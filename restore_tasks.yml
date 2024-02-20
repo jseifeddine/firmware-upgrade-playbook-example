@@ -1,0 +1,10 @@
+- name: wait for opkg to be restored
+  shell:
+    cmd: |
+      [ -f "/bin/opkg" ] || ([ ! -f "/var/lock/opkg.lock" ] && [ -f "/bin/opkg-solo" ] && mv "/bin/opkg-solo" "/bin/opkg") && [ ! -f "/bin/opkg-solo" ] && exit 0 || exit 1
+  register: opkg_restore
+  retries: 20
+  delay: 1
+  changed_when: false
+  timeout: 30
+  until: opkg_restore.rc == 0
